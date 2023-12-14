@@ -8,7 +8,7 @@ object Implementation extends Template {
   import Type.*
   import TypeInfo.*
 
-  def typeCheck(expr: Expr, tenv: TypeEnv): Type = expr match{
+  def typeCheck(expr: Expr, tenv: TypeEnv): Type = expr match
     case EUnit => UnitT
     case ENum(_) => NumT
     case EBool(_) => BoolT
@@ -79,24 +79,19 @@ object Implementation extends Template {
       }
     }
     case EFun(params, body) => {
-      val ptys = params.map(_.ty)
-      for(pty<-ptys) mustValid(pty, tenv)
-      val rty = typeCheck(body, tenv.addVars(params.map(p => p.name -> p.ty)))
-      ArrowT(List.empty[String],ptys, rty)
+      for(param<-params) mustValid(param.ty, tenv)
+      ArrowT(Nil,params.map(p=>p.ty),typeCheck(body, tenv.addVars(params.map((param) => param.name -> param.ty))))
     }
     
-
-    //todo : subst반영해야함
     case EApp(fun, tys, args) => {
-      for(ty <- tys) mustValid(ty,tenv)
       typeCheck(fun, tenv) match {
         case ArrowT(names, ptys, rty) =>{
-          if(ptys.length != args.length) error()
-          for(n<-args.indices) {
-            typeCheck(args(n),tenv)
-            mustSame(typeCheck(args(n),tenv),ptys(n))
-          }
-          rty
+          for(ty <- tys) mustValid(ty,tenv)
+          val argTypeList = args.map(typeCheck(_, tenv))
+          val pairTypeList = argTypeList.zip(ptys)
+          val subMap = names.zip(tys).toMap
+          pairTypeList.foreach((argTy, pty) => mustSame(argTy, subst(pty, subMap)))
+          subst(rty, subMap)
         }
         case ty => error()
       }
@@ -104,36 +99,82 @@ object Implementation extends Template {
     }
     case ERecDefs(defs, body) => {
       val newtenv = defs.foldLeft(tenv){
-        (currentEnv,d) => tenvUpdateRec(d,currentEnv)
+        (tenv,d) => tenvUpdateRec(d,tenv)
       }
-      defs.foreach(d => tRec(d,newtenv))
-      mustValid(typeCheck(body,newtenv),newtenv)
-      typeCheck(body, newtenv)
+      defs.foreach((d) => (tRec(d,newtenv)))
+      mustValid(typeCheck(body,newtenv),tenv)
     }
+    case EMatch(expr, cs) => typeCheck(expr, tenv) match
+      case IdT(name, tys) => tenv.tys.getOrElse(name, error()) match
+        case TIVar => error()
+        case TIAdt(tvars, variants)  =>
+          val ts = cs.map(_.name).toSet
+          val xs = variants.keySet
+          if (ts != variants.keySet || ts.size != cs.length) error()
+          val subMap: Map[String, Type] = tvars.zip(tys).toMap
+          val caseList = cs.map(mcase => variants.find(vart => vart._1 == mcase.name) match {
+            case Some(vart) => vart._2.map(param => param.ty)
+          })
+                                                  
+          val tenvList = cs.map(_.params).zip(caseList).map((params, varTys) => params.zip(varTys.map(subst(_, subMap)))).map(tenv.addVars(_))
+          val typeList = cs.map(mcase => mcase.body).zip(tenvList).map((body, newTEnv) =>{typeCheck(body,newTEnv)})
+                                                      
+          typeList.reduce((lt, rt) => { mustSame(lt, rt); lt })
+      case _ => error()
+    case EExit(ty, expr)                          => mustSame(typeCheck(expr, tenv), StrT); mustValid(ty, tenv)
 
-    case EMatch(e, mcases) => ???
-
-    case EExit(ty,expr) =>{
-      mustValid(ty, tenv)
-      mustSame(typeCheck(expr, tenv),StrT)
-      ty
-      
+  /*TYPE CHECKER HELPER FUNCTIONS FOR RECDEF*/
+  def tenvUpdateRec(rdef : RecDef, tenv : TypeEnv) : TypeEnv = rdef match {
+    case LazyVal(name, ty,init) =>{
+      tenv.addVar((name,ty))
     }
-    
+    case RecFun(name, tvars, params, rty,body) => {
+      tenv.addVar((name,ArrowT(tvars, params.map(_.ty),rty)))
+    }
+    case TypeDef(name, tvars,varts) => tenv.tys.get(name) match {
+      case Some(_) => error()
+      case None => 
+      val newtenv = tenv.addTypeName(name, tvars, varts)
+      varts.foldLeft(newtenv)((ntenv, vart) => {
+          if (ntenv.vars.contains(vart.name)) error()
+          ntenv.addVar((vart.name, ArrowT(tvars, vart.params.map(_.ty), IdT(name, tvars.map(tvar => IdT(tvar, Nil))))))
+          
+      })
+    }
   }
-  def interp(expr: Expr, env: Env): Value = expr match{
+  /*TYPE CHECKER HELPER FUNCTIONS FOR RECDEF*/
+  def tRec(rdef : RecDef, tenv : TypeEnv) : Unit = rdef match {
+    case LazyVal(name, ty, init) => {
+      mustSame(mustValid(ty, tenv),typeCheck(init,tenv))
+    }
+    case RecFun(name, tvars, params, rty, body) =>{
+      tvars.foreach(tvar => tenv.tys.get(tvar) match {
+        case Some(_) => error()
+        case None => ()
+      })
+      val newtenv = tenv.addTypeVars(tvars)
+      params.foreach(param => mustValid(param.ty, newtenv))
+      val newnewtenv = newtenv.addVars(params.map(param => (param.name, param.ty)))
+      mustSame(typeCheck(body,newnewtenv), mustValid(rty,newtenv))
+    }
+    case TypeDef(name, tvars,varts) =>{
+      tvars.foreach(tvar => tenv.tys.get(tvar) match {
+        case Some(_) => error()
+        case None => ()
+      })
+      val newtenv = tenv.addTypeVars(tvars)
+      varts.foreach(vart => {vart.params.foreach(p => mustValid(p.ty,newtenv))})
+    }
+  }
+
+  def interp(expr: Expr, env: Env): Value = expr match
     case EUnit => UnitV
     case ENum(n) => NumV(n)
     case EBool(b) => BoolV(b)
     case EStr(s) => StrV(s)
-    case EId(x) => {
-      env(x) match{
-        case ExprV(e,newEnv) =>{
-          val newnewEnv : Env = newEnv()
-          interp(e,newnewEnv)
-        }
-        case _ => env.getOrElse(x,error())
-      }
+    case EId(x) => env.getOrElse(x,error()) match{
+      case ExprV(expr, eenv) => interp(expr,eenv())
+      case v => v
     }
     case EAdd(l,r) => (interp(l,env),interp(r,env)) match{
       case (NumV(l),NumV(r)) => NumV(l+r)
@@ -174,42 +215,29 @@ object Implementation extends Template {
       case (NumV(l),NumV(r)) => BoolV(l<r)
       case _ => error()
     }
-    case ESeq(l,r) => interp(r,env)
+    case ESeq(l,r) => {
+      interp(l,env)
+      interp(r,env)
+    }
     case EIf(cond, te, ee) => interp(cond,env) match{
       case BoolV(true) => interp(te,env)
       case BoolV(false)=> interp(ee,env)
+      case _ => error()
     }
     case EVal(x,tyOpt,init, body)=> {
-      tyOpt match{
-        case None => interp(body,env + (x -> interp(init, env)))
-        case Some(t)=> interp(body, env + (x -> interp(init, env)))
-      }
+      interp(body, env + (x -> interp(init, env)))
     }
     case EFun(params, body) => CloV(params.map(param => param.name), body, ()=>env)
-    case EApp(fun,tys, args) => interp(fun,env) match {
-      case CloV(ps,b,fenv) => {
-        val vals = args.map(e=>interp(e,env))
-        val addEnv = ps.zip(vals)
-        interp(b, fenv() ++addEnv)
-      }
-      case ConstrV(n) =>{
-        val vs = args.map(interp(_,env))
-        VariantV(n,vs)
-      }
-      case v => error()
-    }
+    case EApp(fun, tys, args) => interp(fun, env) match
+      case CloV(params, body, fenv) => interp(body, fenv() ++ params.zip(args.map(arg => interp(arg, env))).toMap)
+      case ConstrV(name) => VariantV(name, args.map(arg => interp(arg, env)))
+      case _  => error()
     case ERecDefs(defs, body) => {
-      val finalenv : Env = Map()
-      val newenv = defs.foldLeft(env){
-        (currentEnv,d) => envUpdateRec(currentEnv,finalenv,d)
+      lazy val finalenv :Env = defs.foldLeft(env){
+        (currentEnv,d) => envUpdateRec(currentEnv, () => finalenv,d)
       }
-      interp(body, newenv)
+      interp(body, finalenv)
     }
-
-    case EExit(ty, expr)=>{
-      error()
-    }
-
     case EMatch(expr, mcases) => interp(expr,env) match{
       case VariantV(wname, vs) => mcases.find(_.name == wname) match{
         case Some(MatchCase(_,ps,b)) => {
@@ -220,40 +248,34 @@ object Implementation extends Template {
       }
       case v => error()
     }
+    case _ => error()
+
+  /*INTERPRETER HELPER FUNCTIONS FOR RECDEF*/
+  def envUpdateRec(env1 : Env, env2 : () => Env, rdef:RecDef) : Env = rdef match{
+    case LazyVal(name,ty,init)=>{
+      env1+ (name->ExprV(init, env2))
+    }
+    case RecFun(name, tvars, params, rty,body) =>{
+      env1 + (name -> CloV(params.map(param => param.name),body, env2))
+    }
+    case TypeDef(name, tvars,varts) =>{
+      env1 ++ varts.map(vart => (vart.name -> ConstrV(vart.name))).toMap
+    }
   }
 
-  def eq(left: Value, right: Value): Boolean = (left, right) match
-    case (UnitV, UnitV) => true
-    case (NumV(l), NumV(r)) => l == r
-    case (BoolV(l), BoolV(r)) => l == r
-    case (StrV(l), StrV(r)) => l == r
-    case (VariantV(lname, lvalues), VariantV(rname, rvalues)) => {
-      if(lname != rname){
-        lvalues.zip(rvalues).forall { case (l, r) => eq(l,r) }
-      }
-      else false
-    }
-    case _=> false
-  
-  //얘는 다 된 듯?
   def mustValid(ty : Type,tenv : TypeEnv):Type = ty match{
     case UnitT => UnitT
     case NumT => NumT
     case BoolT =>BoolT
     case StrT => StrT
-    case IdT(name,types) => types match{
-      case Nil =>{
-        if(!tenv.vars.contains(name)) error()
+    case IdT(name,types) => tenv.tys.get(name) match{
+      case Some(TIAdt(_,_)) =>
+      {
+        types.foreach(mustValid(_,tenv))
         IdT(name,types)
       }
-      case h::t => {
-        tenv.tys(name) match 
-        case TIAdt(tvars,variants)=>{
-          for (ty <- types) mustValid(ty,tenv)
-          IdT(name,types)
-        }
-        case _ => error()
-      }
+      case Some(TIVar) => IdT(name, types)
+      case _ => error()
     }
     case ArrowT(tvars, paramTys, retTy) =>{
       val newtenv = tenv.addTypeVars(tvars)
@@ -261,34 +283,25 @@ object Implementation extends Template {
       ArrowT(tvars, paramTys, mustValid(retTy,newtenv))
     }
   }
-  
-  //tys,paramTys 다 리스트인데 어떻게 처리해야하노 -> substAll도입?
-  def subst(bodyTy:Type, name:String,ty:Type):Type =bodyTy match{
+
+  def subst(bodyTy:Type, subMap : Map[String, Type]):Type =bodyTy match{
     case UnitT => UnitT
     case NumT => NumT
     case BoolT => BoolT
     case StrT => StrT
     case IdT(x, tys) => tys match{
       case Nil => {
-        if(x == name) ty
-        else IdT(x,tys)
+        subMap.getOrElse(x, IdT(x,tys))
       }
-      case (h::t) =>{
-        if(x == name) IdT(x,tys)
-        else IdT(x,tys.map(ty=>subst(bodyTy, name, ty)))
+      case tys =>{
+        IdT(x,tys.map(t=>subst(t, subMap)))
       }
     }
-    
+    case ArrowT(tvs, ptys, rty) => {
+      ArrowT(tvs,ptys.map(pty => subst(pty,subMap.filter(m => !tvs.contains(m._1)))),subst(rty,subMap.filter(m => !tvs.contains(m._1))))
+    }
   }
-  // def substAll(bodyTy : Type, name : String, ty : Type) : Type = bodyTy match{
-  //   case ArrowT(tvars, paramTys, retTy) =>{
 
-  //   }
-  //   case _ => error()
-  // }
-  
-
-   //todo: ArrowT에 subst 반영
   def isSame(lty : Type, rty : Type) : Boolean = (lty, rty) match{
     case (NumT, NumT) => true
     case (BoolT, BoolT) => true
@@ -297,15 +310,16 @@ object Implementation extends Template {
     case (IdT(name1, tys1), IdT(name2, tys2)) => (tys1, tys2) match{
       case (Nil, Nil) => true
       case (h1::t1,h2::t2) => {
-        tys1.zip(tys2).forall{case (lt,rt) => isSame(lt,rt)}
+        tys1.zip(tys2).map((lt,rt) => isSame(lt,rt)).foldLeft(true)(_ && _)
       }
     }
     case (ArrowT(tvars1, paramTys1, retTy1),ArrowT(tvars2,paramTys2,retTy2)) =>{
-      paramTys1.zip(paramTys2).forall { case (lt, rt) => {
-        isSame(lt,rt)
-        // isSame(lt,subst(rt, tvars2(0), IdT(tvars1(0))))
-      } } //todo: subst반영해야함
-      isSame(retTy1, retTy2)
+      if(tvars1.length == tvars2.length && paramTys1.length == paramTys2.length){
+        
+        val subMap = tvars2.zip(tvars1.map(tvar1 => IdT(tvar1,Nil))).toMap
+        (paramTys1.zip(paramTys2).toMap + (retTy1 -> retTy2)).map((lt,rt) => isSame(lt,subst(rt,subMap))).foldLeft(true)(_ && _)
+      }
+      else false
     }
 
     case _ => false
@@ -317,67 +331,14 @@ object Implementation extends Template {
     }
   }
 
-  def tenvUpdateRec(rdef : RecDef, tenv : TypeEnv) : TypeEnv = rdef match {
-    case LazyVal(name, ty,init) =>{
-      tenv.addVar(name -> ty)
+  def eq(left: Value, right: Value): Boolean = (left, right) match
+    case (UnitV, UnitV) => true
+    case (NumV(l), NumV(r)) => l == r
+    case (BoolV(l), BoolV(r)) => l == r
+    case (StrV(l), StrV(r)) => l == r
+    case (VariantV(lname, lvalues), VariantV(rname, rvalues)) => {
+      lvalues.zip(rvalues).map((lvalue, rvalue) => eq(lvalue, rvalue)).foldLeft(lname == rname)(_ && _)
     }
-    case RecFun(name, tvars, params, rty,body) => {
-      tenv.addVar(name -> ArrowT(tvars, params.map(param => param.ty),rty))
-    }
-    case TypeDef(name, tvars,varts) => {
-      if(!tenv.vars.contains(name)){
-        val newtenv = TypeEnv(Map(),Map())
-        newtenv.addTypeName(name, tvars, varts)
-        for(n<-varts.indices){
-          newtenv.addVar(varts(n).name -> ArrowT(tvars, varts(n).params.map(param => param.ty),IdT(name, varts(n).params.map(param => param.ty))))
-        }//todo : 마지막 인자 varts(n)아닌듯
-        newtenv
-      }
-      else error()
-    }
-  }
+    case (_,_)=> false
 
-  def envUpdateRec(env1 : Env, env2: Env, rdef:RecDef) : Env = rdef match{
-    case LazyVal(name,ty,init)=>{
-      env1 + (name->ExprV(init, ()=>env2))
-    }
-    case RecFun(name, tvars, params, rty,body) =>{
-      env1 + (name -> CloV(params.map(param => param.name),body, ()=>env2))
-    }
-    case TypeDef(name, tvars,varts) =>{
-      varts.foldLeft(env1){
-        (currentEnv, vart) => currentEnv + (vart.name -> ConstrV(vart.name))
-      }
-    }
-  }
-
-  def tRec(rdef : RecDef, tenv : TypeEnv) : RecDef = rdef match {
-    case LazyVal(name, ty, init) => {
-      mustValid(ty, tenv)
-      mustSame(ty,typeCheck(init,tenv))
-      LazyVal(name, ty,init)
-    }
-    case RecFun(name, tvars, params, rty, body) =>{
-      val allNotContained: Boolean = tvars.forall(tv => !tenv.vars.contains(tv))
-      if (allNotContained){
-        val newtenv = tenv.addTypeVars(tvars)
-        params.foreach(param => mustValid(param.ty, tenv))
-        val newnewtenv = tenv.addVars(params.map(param => (param.name, param.ty)))
-        mustSame(typeCheck(body,newnewtenv), rty)
-        RecFun(name, tvars, params, rty, body)
-      }
-      else error()
-    }
-    case TypeDef(name, tvars,varts) =>{
-      val allNotContained: Boolean = tvars.forall(tv => !tenv.vars.contains(tv))
-      if (allNotContained){
-        val newtenv = tenv.addTypeVars(tvars)
-        varts.foreach(vart => {vart.params.foreach(p => mustValid(p.ty,newtenv))})
-        TypeDef(name, tvars,varts)
-      }
-      else error()
-    }
-  }
-
-  
 }
